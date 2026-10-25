@@ -1,0 +1,2 @@
+export const Skeletons = ({ n = 6 }) => <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{Array.from({length:n}).map((_,i)=><div key={i} className="h-72 animate-pulse rounded-xl bg-slate-200"/>)}</div>
+export const Notice = ({ title, text, action }) => <div role="status" className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center"><p className="font-bold">{title}</p><p className="mt-1 text-sm text-slate-600">{text}</p>{action}</div>
