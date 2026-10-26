@@ -1,0 +1,157 @@
+name: CI/CD
+
+# Git push -> Build -> Test -> Docker build -> Push image -> Deploy
+# Any failed test stops the pipeline: later jobs depend on the test jobs via `needs`.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-backend:
+    name: Backend tests (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://test:test@localhost:5432/test?schema=public
+      JWT_SECRET: ci-only-secret-ci-only-secret-ci-only-1234
+      RUN_DB_TESTS: "true"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+      - name: Generate Prisma client and create schema
+        run: |
+          npx prisma generate
+          npx prisma db push --skip-generate
+      - name: Run tests
+        run: npm test
+
+  build-frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+        env:
+          VITE_API_BASE_URL: /api
+          VITE_DEMO_MODE: "false"
+
+  docker:
+    name: Docker build${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && ' and push' || '' }} (${{ matrix.image }})
+    needs: [test-backend, build-frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: backend
+            context: ./backend
+            repo: localbizhub-backend
+          - image: web
+            context: ./frontend
+            repo: localbizhub-web
+    env:
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lowercase owner (GHCR requires lowercase)
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: ${{ env.PUSH == 'true' }}
+          tags: |
+            ghcr.io/${{ env.OWNER }}/${{ matrix.repo }}:${{ github.sha }}
+            ghcr.io/${{ env.OWNER }}/${{ matrix.repo }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    name: Deploy to EC2
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      HOST: ${{ secrets.EC2_HOST }}
+      SSH_USER: ${{ secrets.EC2_USER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+      - name: Copy compose file
+        run: scp docker-compose.prod.yml "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
+      - name: Pull images and restart
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          # Log in to GHCR on the server (read:packages token). Not needed if the packages are public.
+          printf '%s' "$GHCR_PULL_TOKEN" | ssh "$SSH_USER@$HOST" "docker login ghcr.io -u '$OWNER' --password-stdin"
+          ssh "$SSH_USER@$HOST" "cd ~/localbizhub && \
+            export GHCR_OWNER='$OWNER' IMAGE_TAG='${GITHUB_SHA}' && \
+            docker compose -f docker-compose.prod.yml pull && \
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
+            docker image prune -f"
+      - name: Smoke test through Nginx (fails the pipeline if the site is down or returns 502)
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "http://$HOST/health"; then echo; echo "Deployed ${GITHUB_SHA} OK"; exit 0; fi
+            echo "waiting for the app ($i/20)..."; sleep 6
+          done
+          echo "Smoke test failed. Recent container state and logs:"
+          ssh "$SSH_USER@$HOST" "cd ~/localbizhub && docker compose -f docker-compose.prod.yml ps && docker compose -f docker-compose.prod.yml logs --tail=50 web backend"
+          exit 1

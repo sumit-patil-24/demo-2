@@ -1,0 +1,7 @@
+# Troubleshooting drill. Reproduces "502 Bad Gateway after a deployment":
+# the backend now listens on 5001, but Nginx still proxies to backend:5000.
+# The container's own healthcheck reads $PORT, so it reports "healthy" while the site is down.
+services:
+  backend:
+    environment:
+      PORT: "5001"

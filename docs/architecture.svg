@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" font-family="Arial, Helvetica, sans-serif" font-size="13">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#334155"/></marker></defs>
+  <rect width="960" height="520" fill="#ffffff"/>
+  <text x="480" y="28" text-anchor="middle" font-size="18" font-weight="bold">LocalBizHub – architecture</text>
+
+  <!-- request path -->
+  <rect x="20" y="70" width="110" height="60" rx="8" fill="#e2e8f0" stroke="#334155"/><text x="75" y="96" text-anchor="middle">Browser</text><text x="75" y="114" text-anchor="middle" font-size="11">customer / owner / admin</text>
+  <line x1="130" y1="100" x2="205" y2="100" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <text x="168" y="92" text-anchor="middle" font-size="11">HTTP :80</text>
+
+  <rect x="195" y="45" width="745" height="300" rx="12" fill="#f8fafc" stroke="#0f766e" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="210" y="65" font-weight="bold" fill="#0f766e">AWS EC2 (Ubuntu) – Security group: 22 (my IP only), 80, 443 · host firewall: ufw</text>
+
+  <rect x="215" y="80" width="170" height="90" rx="8" fill="#dbeafe" stroke="#1d4ed8"/>
+  <text x="300" y="104" text-anchor="middle" font-weight="bold">web</text><text x="300" y="122" text-anchor="middle">Nginx (non-root)</text><text x="300" y="140" text-anchor="middle" font-size="11">serves React build · :8080 → host :80</text><text x="300" y="156" text-anchor="middle" font-size="11">reverse proxy /api, /health</text>
+  <line x1="385" y1="125" x2="470" y2="125" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <text x="428" y="117" text-anchor="middle" font-size="11">:5000</text>
+
+  <rect x="470" y="80" width="170" height="90" rx="8" fill="#dcfce7" stroke="#15803d"/>
+  <text x="555" y="104" text-anchor="middle" font-weight="bold">backend</text><text x="555" y="122" text-anchor="middle">Node.js / Express</text><text x="555" y="140" text-anchor="middle" font-size="11">JWT auth · Prisma · /health</text><text x="555" y="156" text-anchor="middle" font-size="11">runs as user "node"</text>
+  <line x1="640" y1="125" x2="725" y2="125" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <text x="683" y="117" text-anchor="middle" font-size="11">:5432</text>
+
+  <rect x="725" y="80" width="190" height="90" rx="8" fill="#fef3c7" stroke="#b45309"/>
+  <text x="820" y="104" text-anchor="middle" font-weight="bold">db</text><text x="820" y="122" text-anchor="middle">PostgreSQL 16</text><text x="820" y="140" text-anchor="middle" font-size="11">volume: pgdata</text><text x="820" y="156" text-anchor="middle" font-size="11">not published to the host</text>
+
+  <rect x="215" y="195" width="700" height="62" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="565" y="218" text-anchor="middle" font-weight="bold">Docker Compose network (internal)</text>
+  <text x="565" y="238" text-anchor="middle" font-size="12">Logs: docker compose logs (json-file, rotated) · CPU/mem: docker stats, scripts/monitor.sh · healthchecks on all three containers</text>
+  <text x="565" y="300" text-anchor="middle" font-size="12">Only Nginx is reachable from the Internet. Backend and database are on the internal Docker network.</text>
+
+  <!-- CI/CD -->
+  <rect x="20" y="380" width="900" height="120" rx="12" fill="#faf5ff" stroke="#7e22ce"/>
+  <text x="35" y="402" font-weight="bold" fill="#7e22ce">CI/CD – GitHub Actions</text>
+  <rect x="35" y="420" width="110" height="50" rx="6" fill="#fff" stroke="#7e22ce"/><text x="90" y="442" text-anchor="middle">git push</text><text x="90" y="458" text-anchor="middle" font-size="11">main / develop</text>
+  <rect x="185" y="420" width="130" height="50" rx="6" fill="#fff" stroke="#7e22ce"/><text x="250" y="442" text-anchor="middle">Test</text><text x="250" y="458" text-anchor="middle" font-size="11">API tests + Postgres, FE build</text>
+  <rect x="355" y="420" width="130" height="50" rx="6" fill="#fff" stroke="#7e22ce"/><text x="420" y="442" text-anchor="middle">Docker build</text><text x="420" y="458" text-anchor="middle" font-size="11">backend + web images</text>
+  <rect x="525" y="420" width="140" height="50" rx="6" fill="#fff" stroke="#7e22ce"/><text x="595" y="442" text-anchor="middle">Push to GHCR</text><text x="595" y="458" text-anchor="middle" font-size="11">tag = commit SHA + latest</text>
+  <rect x="705" y="420" width="200" height="50" rx="6" fill="#fff" stroke="#7e22ce"/><text x="805" y="442" text-anchor="middle">Deploy over SSH to EC2</text><text x="805" y="458" text-anchor="middle" font-size="11">pull · up -d · smoke test /health</text>
+  <line x1="145" y1="445" x2="185" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="315" y1="445" x2="355" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="485" y1="445" x2="525" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="665" y1="445" x2="705" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <path d="M805 420 C805 380 820 360 820 345" fill="none" stroke="#7e22ce" stroke-width="2" marker-end="url(#a)"/>
+</svg>
