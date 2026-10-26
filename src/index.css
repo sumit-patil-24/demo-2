@@ -1,7 +1,0 @@
-@tailwind base;@tailwind components;@tailwind utilities;
-body{@apply bg-slate-50 text-navy antialiased}
-:focus-visible{outline:2px solid #4338ca;outline-offset:2px}
-.btn{@apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition disabled:opacity-60}
-.btn-primary{@apply btn bg-brand text-white hover:bg-indigo-800}
-.btn-ghost{@apply btn border border-slate-300 bg-white hover:bg-slate-100}
-.input{@apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-brand}
