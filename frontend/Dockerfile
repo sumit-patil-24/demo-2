@@ -2,7 +2,7 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm install
 COPY . .
 # Baked in at build time. /api is routed to the backend by Nginx, so no CORS and no hard-coded host.
 ARG VITE_API_BASE_URL=/api
