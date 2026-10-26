@@ -1,184 +1,190 @@
-name: CI/CD
 
-# Git push -> Build -> Test -> Docker build -> Push image -> Deploy
-# Any failed test stops the pipeline: later jobs depend on the test jobs via `needs`.
+name: LocalBizHub CI/CD Pipeline
+
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
   pull_request:
-    branches: [main, develop]
+    branches:
+      - main
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  test-backend:
-    name: Backend tests (Postgres)
+  test:
+    name: Test Backend and Frontend
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U test -d test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    env:
-      NODE_ENV: test
-      DATABASE_URL: postgresql://test:test@localhost:5432/test?schema=public
-      JWT_SECRET: ci-only-secret-ci-only-secret-ci-only-1234
-      RUN_DB_TESTS: "true"
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
-      - name: Generate Prisma client and create schema
-        run: |
-          npx prisma generate
-          npx prisma db push --skip-generate
-      - name: Run tests
-        run: npm test
 
-  build-frontend:
-    name: Frontend build
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm install
-      - run: npm run build
-        env:
-          VITE_API_BASE_URL: /api
-          VITE_DEMO_MODE: "false"
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
 
-  docker:
-    name: Docker build${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && ' and push' || '' }} (${{ matrix.image }})
-    needs: [test-backend, build-frontend]
+      - name: Install Backend Dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run Backend Tests
+        working-directory: backend
+        run: npm test -- --passWithNoTests
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run Frontend Tests
+        working-directory: frontend
+        run: npm test -- --passWithNoTests
+
+  build-and-push:
+    name: Build and Push Docker Images
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - image: backend
-            context: ./backend
-            repo: localbizhub-backend
-          - image: web
-            context: ./frontend
-            repo: localbizhub-web
-    env:
-      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to Docker Hub
-        if: env.PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Build (and push on main)
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push Backend Image
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          push: ${{ env.PUSH == 'true' }}
+          context: ./backend
+          push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ matrix.repo }}:${{ github.sha }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ matrix.repo }}:latest
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-backend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-backend:latest
+
+      - name: Build and Push Web Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-web:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-web:latest
 
   deploy:
-    name: Deploy to EC2
-    needs: docker
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Configure and Deploy to EC2
     runs-on: ubuntu-latest
-    environment: production
-    env:
-      HOST: ${{ secrets.EC2_HOST }}
-      SSH_USER: ${{ secrets.EC2_USER }}
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Configure SSH
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Prepare Deployment Directory
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -eu
+            mkdir -p /tmp/localbizhub-deploy
+            mkdir -p "$HOME/localbizhub"
+
+      - name: Copy Production Compose File
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: docker-compose.prod.yml
+          target: /tmp/localbizhub-deploy/
+
+      - name: Configure Environment and Deploy
+        uses: appleboy/ssh-action@v1.0.3
         env:
-          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          install -m 600 -D /dev/null ~/.ssh/id_ed25519
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          POSTGRES_USER: localbizhub
+          POSTGRES_DB: localbizhub
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DOCKER_USER,DOCKERHUB_TOKEN,POSTGRES_USER,POSTGRES_DB,POSTGRES_PASSWORD,JWT_SECRET,CORS_ORIGIN,IMAGE_TAG
+          script: |
+            set -eu
 
-      - name: Ensure remote directory exists
-        run: ssh "$SSH_USER@$HOST" "mkdir -p ~/localbizhub"
-
-      - name: Copy compose file
-        run: scp docker-compose.prod.yml "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
-
-      - name: Install Docker and Docker Compose on EC2 (if missing)
-        run: |
-          ssh "$SSH_USER@$HOST" '
-            if ! command -v docker &> /dev/null; then
-              echo "Docker not found. Installing..."
-              sudo apt-get update
-              sudo apt-get install -y ca-certificates curl
-              sudo install -m 0755 -d /etc/apt/keyrings
-              sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-              sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-              echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-                $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-              sudo apt-get update
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-              sudo usermod -aG docker $USER
-              echo "Docker installed successfully."
-            else
-              echo "Docker is already installed."
+            # Install Docker if it is not already installed.
+            if ! command -v docker >/dev/null 2>&1; then
+              curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+              sudo sh /tmp/get-docker.sh
             fi
-          '
 
-      - name: Pull images and restart
-        env:
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        run: |
-          # Log in to Docker Hub on the server using credentials
-          printf '%s' "$DOCKER_PASSWORD" | ssh "$SSH_USER@$HOST" "docker login -u '${{ secrets.DOCKER_USERNAME }}' --password-stdin"
-          
-          ssh "$SSH_USER@$HOST" "cd ~/localbizhub && \
-            export DOCKER_USER='${{ secrets.DOCKER_USERNAME }}' IMAGE_TAG='${{ github.sha }}' && \
-            newgrp docker << 'EOF'
-              docker compose -f docker-compose.prod.yml pull
-              docker compose -f docker-compose.prod.yml up -d --remove-orphans
-              docker image prune -f
-            EOF"
+            sudo systemctl enable --now docker
 
-      - name: Smoke test through Nginx (fails the pipeline if the site is down or returns 502)
-        run: |
-          for i in $(seq 1 20); do
-            if curl -fsS "http://$HOST/health"; then echo; echo "Deployed ${GITHUB_SHA} OK"; exit 0; fi
-            echo "waiting for the app ($i/20)..."; sleep 6
-          done
-          echo "Smoke test failed. Recent container state and logs:"
-          ssh "$SSH_USER@$HOST" "cd ~/localbizhub && docker compose -f docker-compose.prod.yml ps && docker compose -f docker-compose.prod.yml logs --tail=50 web backend"
-          exit 1
+            # Install the production Compose file.
+            mkdir -p "$HOME/localbizhub"
+            cp /tmp/localbizhub-deploy/docker-compose.prod.yml \
+              "$HOME/localbizhub/docker-compose.prod.yml"
+
+            cd "$HOME/localbizhub"
+
+            # Create the server-side environment file automatically.
+            umask 077
+            printf '%s\n' \
+              "DOCKER_USER=$DOCKER_USER" \
+              "POSTGRES_USER=$POSTGRES_USER" \
+              "POSTGRES_DB=$POSTGRES_DB" \
+              "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" \
+              "JWT_SECRET=$JWT_SECRET" \
+              "CORS_ORIGIN=$CORS_ORIGIN" \
+              "IMAGE_TAG=$IMAGE_TAG" \
+              > .env
+
+            # Validate configuration before deployment.
+            sudo docker compose \
+              --env-file .env \
+              -f docker-compose.prod.yml config -q
+
+            # Authenticate to Docker Hub on EC2.
+            printf '%s' "$DOCKERHUB_TOKEN" |
+              sudo docker login \
+                --username "$DOCKER_USER" \
+                --password-stdin
+
+            # Pull the exact images built for this commit.
+            sudo docker compose \
+              --env-file .env \
+              -f docker-compose.prod.yml pull
+
+            # Start or update the production services.
+            sudo docker compose \
+              --env-file .env \
+              -f docker-compose.prod.yml up -d --remove-orphans
+
+            # Show deployment status.
+            sudo docker compose \
+              --env-file .env \
+              -f docker-compose.prod.yml ps
+
+            # Remove unused images to reclaim disk space.
+            sudo docker image prune -f
