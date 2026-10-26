@@ -113,7 +113,6 @@ jobs:
             ghcr.io/${{ env.OWNER }}/${{ matrix.repo }}:latest
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-
   deploy:
     name: Deploy to EC2
     needs: docker
@@ -132,22 +131,55 @@ jobs:
           install -m 600 -D /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-      - name: Create remote directory
+
+      - name: Ensure remote directory exists
         run: ssh "$SSH_USER@$HOST" "mkdir -p ~/localbizhub"
+
       - name: Copy compose file
         run: scp docker-compose.prod.yml "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
+
+      - name: Install Docker and Docker Compose on EC2 (if missing)
+        run: |
+          ssh "$SSH_USER@$HOST" '
+            if ! command -v docker &> /dev/null; then
+              echo "Docker not found. Installing..."
+              sudo apt-get update
+              sudo apt-get install -y ca-certificates curl
+              sudo install -m 0755 -d /etc/apt/keyrings
+              sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+              sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+              echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+                $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+              sudo apt-get update
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo usermod -aG docker $USER
+              echo "Docker installed successfully."
+            else
+              echo "Docker is already installed."
+            fi
+          '
+
       - name: Pull images and restart
         env:
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         run: |
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-          # Log in to GHCR on the server (read:packages token). Not needed if the packages are public.
+          # Log in to GHCR on the server (read:packages token)
           printf '%s' "$GHCR_PULL_TOKEN" | ssh "$SSH_USER@$HOST" "docker login ghcr.io -u '$OWNER' --password-stdin"
+          
+          # We use `newgrp docker` or wrap commands to ensure the docker group takes effect immediately in this session
           ssh "$SSH_USER@$HOST" "cd ~/localbizhub && \
             export GHCR_OWNER='$OWNER' IMAGE_TAG='${GITHUB_SHA}' && \
-            docker compose -f docker-compose.prod.yml pull && \
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
-            docker image prune -f"
+            newgrp docker << 'EOF'
+              docker compose -f docker-compose.prod.yml pull
+              docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              docker image prune -f
+            EOF"
+
       - name: Smoke test through Nginx (fails the pipeline if the site is down or returns 502)
         run: |
           for i in $(seq 1 20); do
@@ -157,3 +189,7 @@ jobs:
           echo "Smoke test failed. Recent container state and logs:"
           ssh "$SSH_USER@$HOST" "cd ~/localbizhub && docker compose -f docker-compose.prod.yml ps && docker compose -f docker-compose.prod.yml logs --tail=50 web backend"
           exit 1
+
+
+
+
