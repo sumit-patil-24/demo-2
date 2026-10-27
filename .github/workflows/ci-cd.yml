@@ -132,6 +132,26 @@ jobs:
           install -m 600 -D /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+      - name: Install Docker on EC2 (Ubuntu)
+        run: |
+          ssh "$SSH_USER@$HOST" 'bash -s' <<'REMOTE'
+            set -e
+
+            if ! command -v docker >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y docker.io
+            fi
+
+            sudo systemctl enable --now docker
+
+            # Install Docker Compose plugin if missing
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              sudo apt-get install -y docker-compose-v2
+            fi
+
+            sudo docker --version
+            sudo docker compose version
+          REMOTE
       - name: Create application directory on EC2
         run: |
          ssh "$SSH_USER@$HOST" 'mkdir -p ~/localbizhub'
