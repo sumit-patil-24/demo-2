@@ -134,7 +134,7 @@ jobs:
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
       - name: Create application directory on EC2
         run: |
-        ssh "$SSH_USER@$HOST" 'mkdir -p ~/localbizhub'
+         ssh "$SSH_USER@$HOST" 'mkdir -p ~/localbizhub'
       - name: Copy compose file
         run: scp docker-compose.prod.yml "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
       - name: Pull images and restart
