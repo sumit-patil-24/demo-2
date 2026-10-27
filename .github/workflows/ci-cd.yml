@@ -166,6 +166,37 @@ jobs:
         run: |
           ssh "$SSH_USER@$HOST" 'mkdir -p ~/localbizhub'
 
+      
+      - name: Generate production environment file on EC2
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          for name in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB JWT_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "Required GitHub Secret is missing: $name"
+              exit 1
+            fi
+          done
+
+          printf '%s\n' \
+            "POSTGRES_USER=$POSTGRES_USER" \
+            "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" \
+            "POSTGRES_DB=$POSTGRES_DB" \
+            "JWT_SECRET=$JWT_SECRET" |
+            base64 |
+            ssh "$SSH_USER@$HOST" \
+              'mkdir -p "$HOME/localbizhub" &&
+               base64 -d > "$HOME/localbizhub/.env" &&
+               chmod 600 "$HOME/localbizhub/.env"'
+
+          echo "Production environment file provisioned."
+
+
       - name: Copy compose file
         run: |
           scp docker-compose.prod.yml \
