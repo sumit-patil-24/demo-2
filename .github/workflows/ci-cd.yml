@@ -202,13 +202,16 @@ jobs:
           scp docker-compose.prod.yml \
             "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
 
+      
       - name: Pull images and restart
         env:
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
           GHCR_USER: ${{ secrets.GHCR_USER }}
         run: |
-          set -e
+          set -euo pipefail
+
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          TAG="${GITHUB_SHA}"
 
           if [ -z "$GHCR_PULL_TOKEN" ] || [ -z "$GHCR_USER" ]; then
             echo "GHCR credentials are missing."
@@ -221,9 +224,11 @@ jobs:
 
           ssh "$SSH_USER@$HOST" \
             "cd ~/localbizhub && \
-             export GHCR_OWNER='$OWNER' IMAGE_TAG='${GITHUB_SHA}' && \
-             sudo docker compose -f docker-compose.prod.yml pull && \
-             sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
+             export GHCR_OWNER='$OWNER' IMAGE_TAG='$TAG' && \
+             sudo --preserve-env=GHCR_OWNER,IMAGE_TAG docker compose \
+               -f docker-compose.prod.yml pull && \
+             sudo --preserve-env=GHCR_OWNER,IMAGE_TAG docker compose \
+               -f docker-compose.prod.yml up -d --remove-orphans && \
              sudo docker image prune -f"
 
       - name: Smoke test through Nginx
