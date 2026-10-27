@@ -132,6 +132,11 @@ jobs:
           install -m 600 -D /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+      
+      - name: Create application directory on EC2
+        run: |
+        ssh "$SSH_USER@$HOST" 'mkdir -p ~/localbizhub'
+
       - name: Copy compose file
         run: scp docker-compose.prod.yml "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
       - name: Pull images and restart
