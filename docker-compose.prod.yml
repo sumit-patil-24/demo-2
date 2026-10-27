@@ -1,5 +1,5 @@
-# Production stack on the server: pulls images built and pushed by GitHub Actions (Docker Hub). No build step.
-#   IMAGE_TAG=<git sha> DOCKER_USER=<dockerhub-username> docker compose -f docker-compose.prod.yml up -d
+# Production stack on the server: pulls images built and pushed by GitHub Actions (GHCR). No build step.
+#   IMAGE_TAG=<git sha> GHCR_OWNER=<github-user-or-org, lowercase> docker compose -f docker-compose.prod.yml up -d
 # Secrets live in ./.env on the server only (never in git).
 x-logging: &logging
   driver: json-file
@@ -23,7 +23,7 @@ services:
     logging: *logging
 
   backend:
-    image: DOCKER_USER/localbizhub-backend:IMAGE_TAG
+    image: ghcr.io/${GHCR_OWNER:?set GHCR_OWNER}/localbizhub-backend:${IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       db:
@@ -49,7 +49,7 @@ services:
     logging: *logging
 
   web:
-    image: DOCKER_USER/localbizhub-web:IMAGE_TAG
+    image: ghcr.io/${GHCR_OWNER:?set GHCR_OWNER}/localbizhub-web:${IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       backend:

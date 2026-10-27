@@ -1,17 +1,19 @@
+name: CI/CD
 
-name: LocalBizHub CI/CD Pipeline
-
+# Git push -> Build -> Test -> Docker build -> Push image -> Deploy
+# Any failed test stops the pipeline: later jobs depend on the test jobs via `needs`.
 on:
   push:
-    branches:
-      - main
-      - develop
+    branches: [main, develop]
   pull_request:
-    branches:
-      - main
+    branches: [main, develop]
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-backend:
@@ -64,149 +66,92 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci --no-audit --no-fund
+      - run: npm install
       - run: npm run build
         env:
           VITE_API_BASE_URL: /api
           VITE_DEMO_MODE: "false"
 
-  build-and-push:
-    name: Build and Push Docker Images
+  docker:
+    name: Docker build${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && ' and push' || '' }} (${{ matrix.image }})
+    needs: [test-backend, build-frontend]
     runs-on: ubuntu-latest
-    needs: test-backend
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: backend
+            context: ./backend
+            repo: localbizhub-backend
+          - image: web
+            context: ./frontend
+            repo: localbizhub-web
+    env:
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lowercase owner (GHCR requires lowercase)
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and Push Backend Image
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (and push on main)
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
-          push: true
+          context: ${{ matrix.context }}
+          push: ${{ env.PUSH == 'true' }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-backend:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-backend:latest
-
-      - name: Build and Push Web Image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-web:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/localbizhub-web:latest
+            ghcr.io/${{ env.OWNER }}/${{ matrix.repo }}:${{ github.sha }}
+            ghcr.io/${{ env.OWNER }}/${{ matrix.repo }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   deploy:
-    name: Configure and Deploy to EC2
-    runs-on: ubuntu-latest
-    needs: build-and-push
+    name: Deploy to EC2
+    needs: docker
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      HOST: ${{ secrets.EC2_HOST }}
+      SSH_USER: ${{ secrets.EC2_USER }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Prepare Deployment Directory
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -eu
-            mkdir -p /tmp/localbizhub-deploy
-            mkdir -p "$HOME/localbizhub"
-
-      - name: Copy Production Compose File
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: docker-compose.prod.yml
-          target: /tmp/localbizhub-deploy/
-
-      - name: Configure Environment and Deploy
-        uses: appleboy/ssh-action@v1.0.3
+      - uses: actions/checkout@v4
+      - name: Configure SSH
         env:
-          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          POSTGRES_USER: localbizhub
-          POSTGRES_DB: localbizhub
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
-          IMAGE_TAG: ${{ github.sha }}
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          envs: DOCKER_USER,DOCKERHUB_TOKEN,POSTGRES_USER,POSTGRES_DB,POSTGRES_PASSWORD,JWT_SECRET,CORS_ORIGIN,IMAGE_TAG
-          script: |
-            set -eu
-
-            # Install Docker if necessary.
-            if ! command -v docker >/dev/null 2>&1; then
-              curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-              sudo sh /tmp/get-docker.sh
-            fi
-
-            sudo systemctl enable --now docker
-
-            # Install the production Compose file.
-            cp /tmp/localbizhub-deploy/docker-compose.prod.yml \
-              "$HOME/localbizhub/docker-compose.prod.yml"
-
-            cd "$HOME/localbizhub"
-
-            # Generate the production environment file.
-            umask 077
-            printf '%s\n' \
-              "DOCKER_USER=$DOCKER_USER" \
-              "POSTGRES_USER=$POSTGRES_USER" \
-              "POSTGRES_DB=$POSTGRES_DB" \
-              "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" \
-              "JWT_SECRET=$JWT_SECRET" \
-              "CORS_ORIGIN=$CORS_ORIGIN" \
-              "IMAGE_TAG=$IMAGE_TAG" \
-              > .env
-
-            # Validate Compose configuration.
-            sudo docker compose \
-              --env-file .env \
-              -f docker-compose.prod.yml config -q
-
-            # Authenticate to Docker Hub on EC2.
-            printf '%s' "$DOCKERHUB_TOKEN" |
-              sudo docker login \
-                --username "$DOCKER_USER" \
-                --password-stdin
-
-            # Pull the exact images built for this commit.
-            sudo docker compose \
-              --env-file .env \
-              -f docker-compose.prod.yml pull
-
-            # Start or update the application.
-            sudo docker compose \
-              --env-file .env \
-              -f docker-compose.prod.yml up -d --remove-orphans
-
-            # Display deployment status.
-            sudo docker compose \
-              --env-file .env \
-              -f docker-compose.prod.yml ps
-
-            # Remove unused images.
-            sudo docker image prune -f
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+      - name: Copy compose file
+        run: scp docker-compose.prod.yml "$SSH_USER@$HOST:~/localbizhub/docker-compose.prod.yml"
+      - name: Pull images and restart
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          # Log in to GHCR on the server (read:packages token). Not needed if the packages are public.
+          printf '%s' "$GHCR_PULL_TOKEN" | ssh "$SSH_USER@$HOST" "docker login ghcr.io -u '$OWNER' --password-stdin"
+          ssh "$SSH_USER@$HOST" "cd ~/localbizhub && \
+            export GHCR_OWNER='$OWNER' IMAGE_TAG='${GITHUB_SHA}' && \
+            docker compose -f docker-compose.prod.yml pull && \
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
+            docker image prune -f"
+      - name: Smoke test through Nginx (fails the pipeline if the site is down or returns 502)
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "http://$HOST/health"; then echo; echo "Deployed ${GITHUB_SHA} OK"; exit 0; fi
+            echo "waiting for the app ($i/20)..."; sleep 6
+          done
+          echo "Smoke test failed. Recent container state and logs:"
+          ssh "$SSH_USER@$HOST" "cd ~/localbizhub && docker compose -f docker-compose.prod.yml ps && docker compose -f docker-compose.prod.yml logs --tail=50 web backend"
+          exit 1
