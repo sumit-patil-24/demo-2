@@ -37,7 +37,7 @@ jobs:
 
       - name: Run Backend Tests
         working-directory: backend
-        run: npm test -- --passWithNoTests
+        run: npm test 
 
       - name: Install Frontend Dependencies
         working-directory: frontend
