@@ -14,51 +14,66 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test Backend and Frontend
+  test-backend:
+    name: Backend tests (Postgres)
     runs-on: ubuntu-latest
-
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://test:test@localhost:5432/test?schema=public
+      JWT_SECRET: ci-only-secret-ci-only-secret-ci-only-1234
+      RUN_DB_TESTS: "true"
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-
-      - name: Install Backend Dependencies
-        working-directory: backend
-        run: npm install
-
-      - name: Run Backend Tests When Available
-        working-directory: backend
-        shell: bash
+          node-version: 20
+      - name: Install dependencies
         run: |
-          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
-            npm test
-          else
-            echo "::warning::Backend tests skipped because no test script exists."
-          fi
-
-      - name: Install Frontend Dependencies
-        working-directory: frontend
-        run: npm install
-
-      - name: Run Frontend Tests When Available
-        working-directory: frontend
-        shell: bash
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+      - name: Generate Prisma client and create schema
         run: |
-          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
-            npm test
-          else
-            echo "::warning::Frontend tests skipped because no test script exists."
-          fi
+          npx prisma generate
+          npx prisma db push --skip-generate
+      - name: Run tests
+        run: npm test
+
+  build-frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+        env:
+          VITE_API_BASE_URL: /api
+          VITE_DEMO_MODE: "false"
 
   build-and-push:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
-    needs: test
+    needs: test-backend
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
